@@ -1,0 +1,281 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <time.h>
+#include <cuda_runtime.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+
+
+///////////////// User selectable parameters ///////////////////////////////
+
+const int ImageSize = 200;
+const int NumCells = 100;
+
+////////////////////////////////////////////////////////////////////////////
+
+const int CellSize = ImageSize / NumCells;
+
+unsigned char* g_Maze;
+
+// current traversing position
+int g_PtX;
+int g_PtY;
+
+// return the current index in g_Maze
+__device__ int CellIdx(int g_PtX, int g_PtY, int NumCells)
+{
+    return g_PtX + NumCells * g_PtY;
+}
+
+////////////////////////////////////////////////////////////////////////////
+
+__device__ int RandomInt(int* state, int NumCells)
+{
+    return atomicExch(state, 0) % NumCells;
+}
+
+__device__ int RandomInt4(int* state)
+{
+    return atomicExch(state, 0) % 4;
+}
+
+////////////////////////////////////////////////////////////////////////////
+
+typedef enum {
+    eDirection_Invalid = 0,
+    eDirection_Up = 1,
+    eDirection_Right = 2,
+    eDirection_Down = 4,
+    eDirection_Left = 8
+} eDirection;
+
+//                   0  1  2  3  4  5  6  7  8
+//                      U  R     D           L
+__device__ int Heading_X[9] = { 0, 0,+1, 0, 0, 0, 0, 0,-1 };
+__device__ int Heading_Y[9] = { 0,-1, 0, 0,+1, 0, 0, 0, 0 };
+__device__ int Mask[9] = {
+                                0,
+                                eDirection_Down | eDirection_Down << 4,
+                                eDirection_Left | eDirection_Left << 4,
+                                0,
+                                eDirection_Up | eDirection_Up << 4,
+                                0,
+                                0,
+                                0,
+                                eDirection_Right | eDirection_Right << 4
+                            };
+
+
+////////////////////////////////////////////////////////////////////////////
+
+__device__ int IsDirValid(eDirection Dir, int g_PtX, int g_PtY, int NumCells, unsigned char* g_Maze)
+{
+    int NewX = g_PtX + Heading_X[Dir];
+    int NewY = g_PtY + Heading_Y[Dir];
+
+    if (!Dir || NewX < 0 || NewY < 0 || NewX >= NumCells || NewY >= NumCells) return 0;
+
+    return !g_Maze[NewX + NumCells * NewY];
+}
+
+__device__ eDirection GetDirection(int* state, int g_PtX, int g_PtY, int NumCells, unsigned char* g_Maze)
+{
+    eDirection Dir = (eDirection)(1 << RandomInt4(state));
+
+    while (1)
+    {
+        for (int x = 0; x < 4; x++)
+        {
+            if (IsDirValid(Dir, g_PtX, g_PtY, NumCells, g_Maze))
+            {
+                return Dir;
+            }
+
+            Dir = (eDirection)((int)Dir << 1);
+
+            if (Dir > eDirection_Left)
+            {
+                Dir = eDirection_Up;
+            }
+        }
+
+        Dir = (eDirection)((g_Maze[CellIdx(g_PtX, g_PtY, NumCells)] & 0xf0) >> 4);
+
+        // nowhere to go
+            if (!Dir)
+        return eDirection_Invalid;
+
+    g_PtX += Heading_X[(int)Dir];
+    g_PtY += Heading_Y[(int)Dir];
+
+    Dir = (eDirection)(1 << RandomInt4(state));
+}
+}
+__global__ void GenerateMazeKernel(unsigned char* g_Maze, int NumCells, int* randStates, int g_PtX, int g_PtY)
+{
+int idx = blockIdx.x * blockDim.x + threadIdx.x;
+if (idx < NumCells * NumCells)
+{
+    int state = randStates[idx];
+
+    for (eDirection Dir = GetDirection(&state, g_PtX, g_PtY, NumCells, g_Maze); Dir != eDirection_Invalid; Dir = GetDirection(&state, g_PtX, g_PtY, NumCells, g_Maze))
+    {
+        g_Maze[CellIdx(g_PtX, g_PtY, NumCells)] |= Dir;
+
+        g_PtX += Heading_X[Dir];
+        g_PtY += Heading_Y[Dir];
+
+        g_Maze[CellIdx(g_PtX, g_PtY, NumCells)] = Mask[Dir];
+    }
+    randStates[idx] = state;
+}
+}
+void GenerateMaze()
+{
+int ThreadsPerBlock = 256;
+int BlocksPerGrid = (NumCells * NumCells + ThreadsPerBlock - 1) / ThreadsPerBlock;
+unsigned char* d_Maze;
+int* d_randStates;
+
+cudaMalloc((void**)&d_Maze, NumCells * NumCells * sizeof(unsigned char));
+cudaMemcpy(d_Maze, g_Maze, NumCells * NumCells * sizeof(unsigned char), cudaMemcpyHostToDevice);
+
+int* randStates = (int*)malloc(NumCells * NumCells * sizeof(int));
+for (int i = 0; i < NumCells * NumCells; i++)
+{
+    randStates[i] = rand();
+}
+
+cudaMalloc((void**)&d_randStates, NumCells * NumCells * sizeof(int));
+cudaMemcpy(d_randStates, randStates, NumCells * NumCells * sizeof(int), cudaMemcpyHostToDevice);
+
+GenerateMazeKernel<<<BlocksPerGrid, ThreadsPerBlock>>>(d_Maze, NumCells, d_randStates, g_PtX, g_PtY);
+
+cudaMemcpy(g_Maze, d_Maze, NumCells * NumCells * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+
+cudaFree(d_Maze);
+cudaFree(d_randStates);
+free(randStates);
+
+printf("\n");
+}
+int RandomInt(int NumCells)
+{
+    return rand() % NumCells;
+}
+
+#pragma pack(push, 1)
+typedef struct
+{
+	// BITMAPFILEHEADER
+	unsigned short bfType;
+	uint32_t bfSize;
+	unsigned short bfReserved1;
+	unsigned short bfReserved2;
+	uint32_t bfOffBits;
+	// BITMAPINFOHEADER
+	uint32_t biSize;
+	uint32_t biWidth;
+	uint32_t biHeight;
+	unsigned short biPlanes;
+	unsigned short biBitCount;
+	uint32_t biCompression;
+	uint32_t biSizeImage;
+	uint32_t biXPelsPerMeter;
+	uint32_t biYPelsPerMeter;
+	uint32_t biClrUsed;
+	uint32_t biClrImportant;
+} __attribute__((packed,aligned(1))) sBMPHeader;
+#pragma pack(pop)
+
+void SaveBMP(const char* FileName, const void* RawBGRImage, int Width, int Height)
+{
+	sBMPHeader Header;
+
+	int ImageSize = Width * Height * 3;
+
+	Header.bfType = 0x4D * 256 + 0x42;
+	Header.bfSize = ImageSize + sizeof(sBMPHeader);
+	Header.bfReserved1 = 0;
+	Header.bfReserved2 = 0;
+	Header.bfOffBits = 0x36;
+	Header.biSize = 40;
+	Header.biWidth = Width;
+	Header.biHeight = Height;
+	Header.biPlanes = 1;
+	Header.biBitCount = 24;
+	Header.biCompression = 0;
+	Header.biSizeImage = ImageSize;
+	Header.biXPelsPerMeter = 6000;
+	Header.biYPelsPerMeter = 6000;
+	Header.biClrUsed = 0;
+	Header.biClrImportant = 0;
+
+	FILE* File = fopen(FileName, "wb");
+
+	fwrite(&Header, sizeof(Header), 1, File);
+	fwrite(RawBGRImage, ImageSize, 1, File);
+
+	printf("Saved %s\n", FileName);
+
+	fclose(File);
+}
+
+void SaveMazeAsBMP(const char* FileName, const unsigned char* maze, int width, int height, int cellSize)
+{
+    int imgWidth = width * cellSize + 1;
+    int imgHeight = height * cellSize + 1;
+    int imgSize = imgWidth * imgHeight * 3;
+    unsigned char* imgData = (unsigned char*)malloc(imgSize);
+
+    for (int y = 0; y < imgHeight; y++)
+    {
+        for (int x = 0; x < imgWidth; x++)
+        {
+            int cellX = x / cellSize;
+            int cellY = y / cellSize;
+            int mazeIdx = cellY * width + cellX;
+
+            unsigned char color = 0;
+
+            if (x % cellSize == 0 || y % cellSize == 0)
+            {
+                color = 0;
+            }
+            else
+            {
+                color = (maze[mazeIdx] == 0) ? 255 : 0;
+            }
+
+            int imgIdx = (y * imgWidth + x) * 3;
+
+            imgData[imgIdx] = color;
+            imgData[imgIdx + 1] = color;
+            imgData[imgIdx + 2] = color;
+        }
+    }
+
+    SaveBMP(FileName, imgData, imgWidth, imgHeight);
+
+    free(imgData);
+}
+int main()
+{
+    srand(time(NULL));
+
+    g_Maze = (unsigned char*)malloc(NumCells * NumCells * sizeof(unsigned char));
+    memset(g_Maze, 0, NumCells * NumCells * sizeof(unsigned char));
+
+    // setup initial point
+    g_PtX = RandomInt(NumCells);
+    g_PtY = RandomInt(NumCells);
+
+    // traverse
+    GenerateMaze();
+    SaveMazeAsBMP("maze.bmp", g_Maze, NumCells, NumCells, CellSize);
+    // ... (rest of the code remains the same) ...
+
+    return 0;
+}

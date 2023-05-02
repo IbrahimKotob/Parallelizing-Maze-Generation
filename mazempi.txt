@@ -1,0 +1,293 @@
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <time.h>
+
+///////////////// User selectable parameters ///////////////////////////////
+
+const int ImageSize = 200;
+const int NumCells = 100;
+
+////////////////////////////////////////////////////////////////////////////
+
+const int CellSize = ImageSize / NumCells;
+
+unsigned char *g_Maze;
+
+// current traversing position
+int g_PtX;
+int g_PtY;
+
+// return the current index in g_Maze
+int CellIdx() {
+  return g_PtX + NumCells * g_PtY;
+}
+
+////////////////////////////////////////////////////////////////////////////
+
+int RandomInt() {
+  return rand() % NumCells;
+}
+
+int RandomInt4() {
+  return rand() % 4;
+}
+
+////////////////////////////////////////////////////////////////////////////
+
+typedef enum {
+  eDirection_Invalid = 0,
+  eDirection_Up = 1,
+  eDirection_Right = 2,
+  eDirection_Down = 4,
+  eDirection_Left = 8
+} eDirection;
+
+//                   0  1  2  3  4  5  6  7  8
+//                      U  R     D           L
+int Heading_X[9] = {0, 0, +1, 0, 0, 0, 0, 0, -1};
+int Heading_Y[9] = {0, -1, 0, 0, +1, 0, 0, 0, 0};
+int Mask[9] = {
+    0,
+    eDirection_Down | eDirection_Down << 4,
+    eDirection_Left | eDirection_Left << 4,
+    0,
+    eDirection_Up | eDirection_Up << 4,
+    0,
+    0,
+    0,
+    eDirection_Right | eDirection_Right << 4};
+
+////////////////////////////////////////////////////////////////////////////
+
+int IsDirValid(eDirection Dir) {
+  int NewX = g_PtX + Heading_X[Dir];
+  int NewY = g_PtY + Heading_Y[Dir];
+
+  if (!Dir || NewX < 0 || NewY < 0 || NewX >= NumCells || NewY >= NumCells)
+    return 0;
+
+  return !g_Maze[NewX + NumCells * NewY];
+}
+
+void DrawPoint(unsigned char *img, int x, int y, unsigned char r, unsigned char g,
+               unsigned char b) {
+  if (x >= ImageSize || y >= ImageSize)
+    return;
+  int i = 3 * (y * ImageSize + x);
+  img[i + 2] = r;
+  img[i + 1] = g;
+  img[i + 0] = b;
+}
+
+eDirection GetDirection() {
+  eDirection Dir = (eDirection)(1 << RandomInt4());
+
+  while (1) {
+    for (int x = 0; x < 4; x++) {
+      if (IsDirValid(Dir)) {
+        return Dir;
+      }
+
+      Dir = (eDirection)((int)Dir << 1);
+
+      if (Dir > eDirection_Left) {
+        Dir = eDirection_Up;
+      }
+    }
+
+    Dir = (eDirection)((g_Maze[CellIdx()] & 0xf0) >> 4);
+
+    // nowhere to go
+    if (!Dir)
+      return eDirection_Invalid;
+
+    g_PtX += Heading_X[(int)Dir];
+    g_PtY += Heading_Y[(int)Dir];
+
+    Dir = (eDirection)(1 << RandomInt4());
+  }
+}
+
+void GenerateMaze()
+{
+int Cells = 0;
+for (eDirection Dir = GetDirection(); Dir != eDirection_Invalid; Dir = GetDirection())
+{
+	// a progress indicator, kind of
+	if (++Cells % 1000 == 0) printf(".");
+
+	g_Maze[CellIdx()] |= Dir;
+
+	g_PtX += Heading_X[Dir];
+	g_PtY += Heading_Y[Dir];
+
+	g_Maze[CellIdx()] = Mask[Dir];
+}
+
+printf("\n");
+}
+
+#pragma pack(push, 1)
+typedef struct
+{
+// BITMAPFILEHEADER
+ uint16_t bfType;
+  uint32_t bfSize;
+  uint16_t bfReserved1;
+  uint16_t bfReserved2;
+  uint32_t bfOffBits;
+  uint32_t biSize;
+  int32_t biWidth;
+  int32_t biHeight;
+  uint16_t biPlanes;
+  uint16_t biBitCount;
+  uint32_t biCompression;
+  uint32_t biSizeImage;
+  int32_t biXPelsPerMeter;
+  int32_t biYPelsPerMeter;
+  uint32_t biClrUsed;
+  uint32_t biClrImportant;
+} __attribute__((packed, aligned(1))) sBMPHeader;
+
+#pragma pack(pop)
+
+void SaveBMP(const char *FileName, const void *RawBGRImage, int Width, int Height)
+{
+sBMPHeader Header;
+int ImageSize = Width * Height * 3;
+
+Header.bfType = 0x4D * 256 + 0x42;
+Header.bfSize = ImageSize + sizeof(sBMPHeader);
+Header.bfReserved1 = 0;
+Header.bfReserved2 = 0;
+Header.bfOffBits = 0x36;
+Header.biSize = 40;
+Header.biWidth = Width;
+Header.biHeight = Height;
+Header.biPlanes = 1;
+Header.biBitCount = 24;
+Header.biCompression = 0;
+Header.biSizeImage = ImageSize;
+Header.biXPelsPerMeter = 6000;
+Header.biYPelsPerMeter = 6000;
+Header.biClrUsed = 0;
+Header.biClrImportant = 0;
+
+FILE *File = fopen(FileName, "wb");
+
+fwrite(&Header, sizeof(Header), 1, File);
+fwrite(RawBGRImage, ImageSize, 1, File);
+
+printf("Saved %s\n", FileName);
+
+fclose(File);
+}
+
+void Line(unsigned char *img, int x1, int y1, int x2, int y2)
+{
+if (x1 == x2)
+{
+// vertical line
+for (int y = y1; y < y2; y++)
+{
+if (x1 >= ImageSize || y >= ImageSize) continue;
+int i = 3 * (y * ImageSize + x1);
+img[i + 2] = img[i + 1] = img[i + 0] = 255;
+}
+}
+if (y1 == y2)
+{
+	// horizontal line
+	for (int x = x1; x < x2; x++)
+	{
+		if (y1 >= ImageSize || x >= ImageSize) continue;
+		int i = 3 * (y1 * ImageSize + x);
+		img[i + 2] = img[i + 1] = img[i + 0] = 255;
+	}
+}
+}
+
+void RenderMaze(unsigned char *img, int startX, int startY, int endX, int endY)
+{for (int y = 0; y < NumCells; y++)
+{
+for (int x = 0; x < NumCells; x++)
+{
+char v = g_Maze[y * NumCells + x];
+		int nx = x * CellSize;
+		int ny = y * CellSize;
+
+		if (!(v & eDirection_Up)) Line(img, nx, ny, nx + CellSize + 1, ny);
+		if (!(v & eDirection_Right)) Line(img, nx + CellSize, ny, nx + CellSize, ny + CellSize + 1);
+		if (!(v & eDirection_Down)) Line(img, nx, ny + CellSize, nx + CellSize + 1, ny + CellSize);
+		if (!(v & eDirection_Left)) Line(img, nx, ny, nx, ny + CellSize + 1);
+	}
+}
+DrawPoint(img, startX * CellSize + CellSize / 2, startY * CellSize + CellSize / 2, 0, 255, 0);
+DrawPoint(img, endX * CellSize + CellSize / 2, endY * CellSize + CellSize / 2, 255, 0, 0);
+}
+
+int main(int argc, char **argv)
+{
+clock_t start_time = clock();
+int rank, size;
+MPI_Init(&argc, &argv);
+MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+if (rank == 0)
+{
+	printf("Depth-first Search Random Maze Generator\n");
+	printf("Generating %d x %d maze into %d x %d bitmap\n", NumCells, NumCells, ImageSize, ImageSize);
+
+	// prepare PRNG
+	srand(time(NULL));
+
+	// Allocate memory for g_Maze
+	g_Maze = (unsigned char *)malloc(NumCells * NumCells * sizeof(unsigned char));
+
+	// clear maze
+	memset(g_Maze, 0, NumCells * NumCells);
+
+	// setup initial point
+	g_PtX = RandomInt();
+	g_PtY = RandomInt();
+	int startX = RandomInt();
+	int startY = RandomInt();
+	int endX, endY;
+
+	do
+	{
+		endX = RandomInt();
+		endY = RandomInt();
+	} while (startX == endX && startY == endY);
+	// traverse
+	GenerateMaze();
+
+	// prepare BGR image
+	size_t DataSize = 3 * ImageSize * ImageSize;
+
+	unsigned char *Img = (unsigned char *)malloc(DataSize);
+
+	memset(Img, 0, DataSize);
+
+	// render maze on bitmap
+	RenderMaze(Img, startX, startY, endX, endY);
+
+	SaveBMP("Maze.bmp", Img, ImageSize, ImageSize);
+
+	// cleanup
+	free(Img);
+	free(g_Maze); // Free memory for g_Maze
+}
+
+MPI_Finalize();
+clock_t end_time = clock();
+
+	double time_diff = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
+
+	printf("Runtime: %f seconds\n", time_diff);
+return 0;
+}
